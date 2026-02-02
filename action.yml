@@ -1,0 +1,179 @@
+name: 'SmoothDev Release Notes'
+description: 'Generate AI-powered release notes using SmoothDev CLI'
+author: 'SmoothDev'
+
+branding:
+  icon: 'file-text'
+  color: 'green'
+
+inputs:
+  api_key:
+    description: 'SmoothDev API key (use secrets.SMOOTHDEV_API_KEY)'
+    required: true
+  from_tag:
+    description: 'Starting tag/ref for release notes'
+    required: false
+  to_tag:
+    description: 'Ending tag/ref (defaults to HEAD)'
+    required: false
+    default: 'HEAD'
+  output_format:
+    description: 'Output format: text, json, or changelog'
+    required: false
+    default: 'text'
+  push_to_github:
+    description: 'Create/update GitHub release (true/false)'
+    required: false
+    default: 'false'
+  release_tag:
+    description: 'Release tag for GitHub release (required if push_to_github is true)'
+    required: false
+  release_name:
+    description: 'Release name override'
+    required: false
+  draft:
+    description: 'Create as draft release (true/false)'
+    required: false
+    default: 'false'
+  prerelease:
+    description: 'Mark as prerelease (true/false)'
+    required: false
+    default: 'false'
+  use_ai_gateway:
+    description: 'Use AI Gateway instead of REST API (true/false)'
+    required: false
+    default: 'false'
+  cli_version:
+    description: 'smooth-cli version to install (default: latest)'
+    required: false
+    default: ''
+
+outputs:
+  release_notes:
+    description: 'Generated release notes'
+    value: ${{ steps.generate.outputs.release_notes }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install smooth-cli
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.cli_version }}" ]; then
+          pip install smooth-cli==${{ inputs.cli_version }}
+        else
+          pip install smooth-cli
+        fi
+        echo "Installed smooth-cli version:"
+        smooth --version || echo "Version command not available"
+
+    - name: Configure CLI
+      shell: bash
+      run: |
+        mkdir -p ~/.smoothdevio
+        cat > ~/.smoothdevio/config.json << EOF
+        {
+          "api_key": "${{ inputs.api_key }}",
+          "use_ai_gateway": ${{ inputs.use_ai_gateway }}
+        }
+        EOF
+        echo "CLI configured"
+
+    - name: Detect tags
+      id: tags
+      shell: bash
+      run: |
+        FROM_TAG="${{ inputs.from_tag }}"
+        TO_TAG="${{ inputs.to_tag }}"
+        
+        # If from_tag not provided, try to detect previous tag
+        if [ -z "$FROM_TAG" ]; then
+          # Get the most recent tag before HEAD
+          FROM_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$FROM_TAG" ]; then
+            echo "::error::Could not detect starting tag. Please provide 'from_tag' input."
+            exit 1
+          fi
+          echo "Auto-detected from_tag: ${FROM_TAG}"
+        fi
+        
+        echo "from_tag=${FROM_TAG}" >> "$GITHUB_OUTPUT"
+        echo "to_tag=${TO_TAG}" >> "$GITHUB_OUTPUT"
+        echo "Generating release notes from ${FROM_TAG} to ${TO_TAG}"
+
+    - name: Generate release notes
+      id: generate
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SMOOTHDEV_API_KEY: ${{ inputs.api_key }}
+      run: |
+        OWNER="${{ github.repository_owner }}"
+        REPO="${{ github.event.repository.name }}"
+        FROM_TAG="${{ steps.tags.outputs.from_tag }}"
+        TO_TAG="${{ steps.tags.outputs.to_tag }}"
+        
+        echo "Generating release notes for ${OWNER}/${REPO} from ${FROM_TAG} to ${TO_TAG}"
+        
+        # Build command
+        CMD="smooth release generate --owner ${OWNER} --repo ${REPO} --from-tag ${FROM_TAG} --to-tag ${TO_TAG}"
+        
+        # Add output format
+        if [ "${{ inputs.output_format }}" == "json" ]; then
+          CMD="${CMD} --output json"
+        elif [ "${{ inputs.output_format }}" == "changelog" ]; then
+          CMD="${CMD} --format changelog"
+        fi
+        
+        # Add push options if requested
+        if [ "${{ inputs.push_to_github }}" == "true" ]; then
+          if [ -z "${{ inputs.release_tag }}" ]; then
+            echo "::error::release_tag is required when push_to_github is true"
+            exit 1
+          fi
+          CMD="${CMD} --push --tag ${{ inputs.release_tag }}"
+          
+          if [ -n "${{ inputs.release_name }}" ]; then
+            CMD="${CMD} --name \"${{ inputs.release_name }}\""
+          fi
+          
+          if [ "${{ inputs.draft }}" == "true" ]; then
+            CMD="${CMD} --draft"
+          fi
+          
+          if [ "${{ inputs.prerelease }}" == "true" ]; then
+            CMD="${CMD} --prerelease"
+          fi
+        fi
+        
+        # Run generation and capture output
+        OUTPUT_FILE="${RUNNER_TEMP}/release_notes.txt"
+        
+        if ${CMD} > "${OUTPUT_FILE}" 2>&1; then
+          echo "Generation successful"
+          
+          # Set output (handle multiline)
+          {
+            echo "release_notes<<EOF"
+            cat "${OUTPUT_FILE}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          
+          echo "::notice::Release notes generated successfully"
+          
+          # Print preview
+          echo "--- Release Notes Preview ---"
+          head -50 "${OUTPUT_FILE}"
+          if [ $(wc -l < "${OUTPUT_FILE}") -gt 50 ]; then
+            echo "... (truncated)"
+          fi
+        else
+          echo "::error::Generation failed"
+          cat "${OUTPUT_FILE}"
+          exit 1
+        fi
