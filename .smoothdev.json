@@ -2,9 +2,9 @@
   "owner": "smoothdev-io",
   "repo": "release-notes-action",
   "defaults": {
-    "owner": null,
-    "repo": null,
-    "base_branch": null,
+    "owner": "smoothdev-io",
+    "repo": "release-notes-action",
+    "base_branch": "main",
     "output": "text",
     "verbose": false,
     "auto_commit": false
